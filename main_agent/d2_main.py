@@ -9,12 +9,14 @@ from typing import Optional, Dict, Any
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from services.llm_service import LLMService
+from services.stt_service import STTService
 
 class D2Agent:
     def __init__(self):
         self.name = "D2"
         self.mcp_agents = []
         self.llm_service = LLMService()
+        self.stt_service = STTService()
         self.load_mcp_agents()
 
     def _find_calendar_agent(self):
@@ -80,7 +82,7 @@ class D2Agent:
         """若命中日历意图则调用日历智能体并返回文本；否则返回 None。"""
         # 优先使用大模型语义解析来路由
         parsed = self._llm_semantic_parse(prompt)
-        if parsed and parsed.get('route') in ('calendar', 'email', 'summary'):
+        if parsed and parsed.get('route') in ('calendar', 'email', 'summary', 'stt'):
             if parsed.get('route') == 'calendar':
                 cal = self._find_calendar_agent()
                 if not cal:
@@ -151,6 +153,27 @@ class D2Agent:
                     except Exception as e:
                         return f"抱歉，生成摘要时出现错误：{e}"
                     return out
+                else:
+                    return None
+            elif parsed.get('route') == 'stt':
+                action = parsed.get('action')
+                if action in ('transcribe', 'stt'):
+                    audio_raw = parsed.get('audio_file_path')
+                    backend_raw = parsed.get('stt_backend')
+                    model_raw = parsed.get('stt_model')
+                    lang_raw = parsed.get('stt_language')
+                    audio_path = audio_raw if isinstance(audio_raw, str) and audio_raw.strip() else None
+                    backend = backend_raw if isinstance(backend_raw, str) and backend_raw.strip() else None
+                    model = model_raw if isinstance(model_raw, str) and model_raw.strip() else None
+                    language = lang_raw if isinstance(lang_raw, str) and lang_raw.strip() else None
+                    if not audio_path:
+                        return "请提供本地音频文件路径用于转写。"
+                    res = self.stt_service.transcribe(audio_path=audio_path, backend=backend, model=model, language=language)
+                    if not res.get('ok'):
+                        return f"语音转文字失败：{res.get('error') or '未知错误'}"
+                    text = str(res.get('text') or '').strip()
+                    used = res.get('backend') or 'unknown'
+                    return f"[STT:{used}] 转写结果：\n{text}"
                 else:
                     return None
             else:
@@ -538,6 +561,7 @@ class D2Agent:
         meeting_keywords = ['会议通知', '会议邀请', '邀请函', 'meeting invite', 'meeting']
         email_verify_keywords = ['验证', '登录', '密码']
         summary_keywords = ['摘要', '总结', '概述', '提炼', '要点', '梳理', '概括', '结构化大纲', '大纲', '结论+建议', '三段式', 'docx', 'pdf', 'word', '文档', '报告', 'outline', 'bullets', 'conclusion']
+        stt_keywords = ['语音转文字', '转文字', '音频识别', '语音识别', '转写', '转录', '听写']
         if any(k in prompt for k in cal_keywords):
             cal = self._find_calendar_agent()
             if not cal:
@@ -601,6 +625,35 @@ class D2Agent:
             except Exception as e:
                 return f"抱歉，生成摘要时出现错误：{e}"
             return out
+        elif any(k in prompt for k in stt_keywords):
+            # 语音转文字兜底：提取音频文件路径、后端与语言
+            # 支持常见音频/视频容器（whisper 可识别）
+            audio_path = None
+            try:
+                m_audio = re.search(r"(/[^\s,;]+\.(?:wav|mp3|m4a|ogg|flac|mp4))", prompt, re.IGNORECASE)
+                if m_audio:
+                    audio_path = m_audio.group(1)
+            except Exception:
+                pass
+            p_lower = prompt.lower()
+            backend = None
+            if 'fun-asr' in p_lower or 'funasr' in p_lower:
+                backend = 'funasr'
+            elif 'whisper' in p_lower:
+                backend = 'whisper'
+            language = None
+            if '英文' in prompt or 'english' in p_lower:
+                language = 'en'
+            elif '中文' in prompt or '汉字' in prompt or 'chinese' in p_lower:
+                language = 'zh'
+            if not audio_path:
+                return "请提供音频文件路径，例如：语音转文字 /Users/xx/audio.mp3"
+            res = self.stt_service.transcribe(audio_path=audio_path, backend=backend, language=language)
+            if not res.get('ok'):
+                return f"语音转文字失败：{res.get('error') or '未知错误'}"
+            text = str(res.get('text') or '').strip()
+            used = res.get('backend') or 'unknown'
+            return f"[STT:{used}] 转写结果：\n{text}"
         elif any(k in prompt for k in email_verify_keywords):
             em = self._find_email_agent()
             if not em:
@@ -886,7 +939,7 @@ class D2Agent:
         sys_msg = (
             "你是一个路由器，负责把用户的中文指令解析为一个 JSON。"
             "只输出 JSON，不要输出其他文字。"
-            "字段包括: route<'calendar'|'email'|'summary'|'none'>, action<'list'|'create'|'send'|'verify'|'mark'|'move'|'summarize'|'process_meetings'|'review_attachments'|null>,"
+            "字段包括: route<'calendar'|'email'|'summary'|'stt'|'none'>, action<'list'|'create'|'send'|'verify'|'mark'|'move'|'summarize'|'process_meetings'|'review_attachments'|'transcribe'|null>,"
             " start<YYYY-MM-DDTHH:MM:SS或null>, end<同上或null>, calendar_name<或null>,"
             " title<创建事件标题或null>, location<或null>, remaining<boolean，用于'还有/剩余/剩下'>,"
             " mailbox_name<邮件列表查询的邮箱名或null>, unread_only<boolean或null>, limit<number或null>,"
@@ -895,7 +948,8 @@ class D2Agent:
             " email_ids<string[]或string或null>, mark_read<boolean或null>, email_move_to<string或null>,"
             " email_address<string或null>, email_password<string或null>, imap_server<string或null>, smtp_server<string或null>, imap_port<number或null>, smtp_port<number或null>,"
             " summary_text<string或null>, summary_file_path<string或null>, summary_style<string或null>, summary_length<string或null>, summary_language<'zh'|'en'或null>, summary_format<'bullets'|'outline'|'conclusion_recommendations'或null>,"
-            " review_requirements<string或null>, review_preset_id<string或null>。"
+            " review_requirements<string或null>, review_preset_id<string或null>,"
+            " audio_file_path<string或null>, stt_backend<'whisper'|'funasr'或null>, stt_model<string或null>, stt_language<'zh'|'en'或null>。"
             " 语义规则示例：'本周还有哪些日程' -> route:'calendar', action:'list', start:现在, end:本周日23:59, remaining:true;"
             " '帮我添加明天上午10点的会议到日历' -> route:'calendar', action:'create', title:'会议', start:明天10:00, end:明天11:00;"
             " '列出今天未读邮件' -> route:'email', action:'list', start:今天00:00, end:今天23:59, unread_only:true;"
@@ -906,7 +960,9 @@ class D2Agent:
             " '审查附件并把结果写入草稿' -> route:'email', action:'review_attachments', email_ids:['<msg-id-1>'], review_requirements:'质量规范', review_preset_id:null;"
             " '请对/Users/xx/report.pdf生成要点摘要，简短一些，输出英文' -> route:'summary', action:'summarize', summary_file_path:'/Users/xx/report.pdf', summary_style:'要点式', summary_length:'简短', summary_language:'en', summary_format:'bullets';"
             " '请把下面这段文字概述成中文的结构化大纲' -> route:'summary', action:'summarize', summary_text:'<用户给出的文字>', summary_style:'要点式', summary_language:'zh', summary_format:'outline';"
-            " '请生成结论+建议三段式摘要' -> route:'summary', action:'summarize', summary_text:'<用户给出的文字>', summary_language:'zh', summary_format:'conclusion_recommendations'。"
+            " '请生成结论+建议三段式摘要' -> route:'summary', action:'summarize', summary_text:'<用户给出的文字>', summary_language:'zh', summary_format:'conclusion_recommendations';"
+            " '把/Users/xx/audio.mp3转成中文文字' -> route:'stt', action:'transcribe', audio_file_path:'/Users/xx/audio.mp3', stt_language:'zh';"
+            " '用fun-asr识别/Users/xx/meeting.wav' -> route:'stt', action:'transcribe', audio_file_path:'/Users/xx/meeting.wav', stt_backend:'funasr'。"
             f" 当前时间: {now_iso}。若用户未给日历名，不必填 calendar_name。"
         )
         user_msg = f"用户指令：{prompt}。请严格返回JSON。"
@@ -937,6 +993,26 @@ class D2Agent:
             parsed['route'] = 'none'
         return parsed
 
+    def process_prompt(self, prompt: str) -> str:
+        """处理单次用户输入，返回整洁的字符串输出，供图形界面复用。"""
+        try:
+            routed = self._maybe_route_to_calendar(prompt)
+            if routed is not None:
+                return str(routed)
+            # 若关键词兜底未命中，则尝试调用 LLM 简答
+            best_model = self.llm_service.get_best_model()
+            best_model_str = str(best_model) if best_model else None
+            if best_model_str is not None:
+                try:
+                    resp = self.llm_service.query(best_model_str, prompt)
+                except Exception as e:
+                    return f"抱歉，模型调用失败：{e}"
+                return str(resp)
+            else:
+                return "抱歉，当前未连接大模型服务，可使用日历/邮件/摘要/语音转文字关键词功能。"
+        except Exception as e:
+            return f"抱歉，处理输入时出现错误：{e}"
+
     def load_mcp_agents(self):
         print("正在加载MCP智能体...")
         mcp_agents_dir = os.path.join(os.path.dirname(__file__), '..', 'mcp_agents')
@@ -955,12 +1031,14 @@ class D2Agent:
         print(f"你好，我是 {self.name}，你的个人助理。")
         print(f"已加载的MCP智能体: {[agent.name for agent in self.mcp_agents]}")
         
+        # 将 best_model_str 明确声明为 Optional[str]，避免 None 与 str 的类型冲突
+        best_model_str: Optional[str] = None
         best_model = self.llm_service.get_best_model()
         if not best_model:
-            print("没有可用的大模型服务。退出。")
-            return
-        best_model_str: str = str(best_model)
-        print(f"使用模型: {best_model_str}")
+            print("没有可用的大模型服务，将使用关键词与规则模式。")
+        else:
+            best_model_str = str(best_model)
+            print(f"使用模型: {best_model_str}")
 
         while True:
             try:
@@ -971,7 +1049,10 @@ class D2Agent:
                 if routed is not None:
                     response = routed
                 else:
-                    response = self.llm_service.query(best_model_str, prompt)
+                    if best_model_str is not None:
+                        response = self.llm_service.query(best_model_str, prompt)
+                    else:
+                        response = "抱歉，当前未连接大模型服务，可使用日历/邮件/摘要/语音转文字关键词功能。"
                 print(f"D2: {response}")
             except KeyboardInterrupt:
                 break

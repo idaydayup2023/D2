@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Python caches
+**/__pycache__/
+*.py[cod]
+
+# GUI uploads: keep folder, ignore files
+gui/uploads/*
+!gui/uploads/.gitkeep

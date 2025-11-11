@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+      .msg { white-space: pre-wrap; }
+      .shadow-soft { box-shadow: 0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -2px rgba(0,0,0,.05); }
+    </style>
+  </head>
+  <body class="bg-gray-100">
+    <div class="min-h-screen flex flex-col">
+      <header class="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 text-white">
+        <div class="max-w-4xl mx-auto px-4 py-4">
+          <h1 class="text-2xl font-semibold">D2 助理</h1>
+          <p class="opacity-90">图形界面交互 · 输出整洁美观</p>
+        </div>
+      </header>
+
+      <main class="flex-1">
+        <div class="max-w-4xl mx-auto px-4 py-6">
+          <div id="chat" class="bg-white rounded-lg p-4 shadow-soft h-96 overflow-y-auto">
+            <!-- 消息列表 -->
+          </div>
+          <div class="mt-4 flex gap-2">
+            <input id="prompt" type="text" class="flex-1 border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="请输入您的问题，例如：列出今天的日程，或将/Users/xx/audio.wav转文字" />
+            <button id="send" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-md">发送</button>
+          </div>
+
+          <div class="mt-6 bg-white rounded-lg p-4 shadow-soft">
+            <h2 class="text-lg font-semibold text-gray-700">音频上传并转写</h2>
+            <p class="text-sm text-gray-500">支持 wav/mp3/m4a/mp4/aac/flac/ogg/webm。可选后端与语言。</p>
+            <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label class="text-sm text-gray-600">选择音频文件</label>
+                <input id="audio" type="file" accept="audio/*,video/mp4,video/webm" class="mt-1 block w-full" />
+              </div>
+              <div>
+                <label class="text-sm text-gray-600">后端</label>
+                <select id="backend" class="mt-1 w-full border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                  <option value="">自动</option>
+                  <option value="whisper">Whisper</option>
+                  <option value="funasr">Fun-ASR</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-sm text-gray-600">语言提示</label>
+                <select id="language" class="mt-1 w-full border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                  <option value="">自动</option>
+                  <option value="zh">中文</option>
+                  <option value="en">英文</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-sm text-gray-600">模型（可选）</label>
+                <input id="model" type="text" placeholder="如 whisper: base / funasr: 模型ID" class="mt-1 w-full border rounded-md px-3 py-2" />
+              </div>
+              <div class="md:col-span-2">
+                <label class="text-sm text-gray-600">提示词（可选，Whisper 支持 initial_prompt）</label>
+                <input id="prompt2" type="text" placeholder="如：人名缩写或领域专有词" class="mt-1 w-full border rounded-md px-3 py-2" />
+              </div>
+            </div>
+            <div class="mt-3">
+              <button id="upload" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md">上传并转写</button>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <footer class="text-center text-gray-500 py-6">
+        <small>D2 © 助理 · 简洁美观的交互体验</small>
+      </footer>
+    </div>
+
+    <script>
+      const chatEl = document.getElementById('chat');
+      const promptEl = document.getElementById('prompt');
+      const sendEl = document.getElementById('send');
+      const audioEl = document.getElementById('audio');
+      const backendEl = document.getElementById('backend');
+      const languageEl = document.getElementById('language');
+      const modelEl = document.getElementById('model');
+      const prompt2El = document.getElementById('prompt2');
+      const uploadEl = document.getElementById('upload');
+
+      function addMsg(role, text) {
+        const wrap = document.createElement('div');
+        wrap.className = 'my-2 flex';
+        const inner = document.createElement('div');
+        inner.className = 'msg max-w-3xl px-3 py-2 rounded-lg';
+        inner.textContent = text;
+        if (role === 'user') {
+          wrap.classList.add('justify-end');
+          inner.classList.add('bg-indigo-50', 'border', 'border-indigo-200');
+        } else {
+          wrap.classList.add('justify-start');
+          inner.classList.add('bg-gray-50', 'border', 'border-gray-200');
+        }
+        wrap.appendChild(inner);
+        chatEl.appendChild(wrap);
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+
+      async function ask(prompt) {
+        addMsg('user', prompt);
+        sendEl.disabled = true;
+        sendEl.textContent = '发送中…';
+        try {
+          const resp = await fetch('/api/ask', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt })
+          });
+          const data = await resp.json();
+          if (data.ok) {
+            addMsg('assistant', data.response || '');
+          } else {
+            addMsg('assistant', '发生错误：' + (data.error || '未知错误'));
+          }
+        } catch (e) {
+          addMsg('assistant', '网络或服务异常：' + e);
+        } finally {
+          sendEl.disabled = false;
+          sendEl.textContent = '发送';
+        }
+      }
+
+      sendEl.addEventListener('click', () => {
+        const p = promptEl.value.trim();
+        if (!p) return;
+        promptEl.value = '';
+        ask(p);
+      });
+
+      promptEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendEl.click();
+      });
+
+      uploadEl.addEventListener('click', async () => {
+        const file = audioEl.files[0];
+        if (!file) { addMsg('assistant', '请先选择音频文件'); return; }
+        const backend = backendEl.value || '';
+        const language = languageEl.value || '';
+        const model = modelEl.value.trim();
+        const prompt2 = prompt2El.value.trim();
+        addMsg('user', `上传音频：${file.name}（后端：${backend || 'auto'}，语言：${language || 'auto'}）`);
+        const fd = new FormData();
+        fd.append('file', file);
+        if (backend) fd.append('backend', backend);
+        if (language) fd.append('language', language);
+        if (model) fd.append('model', model);
+        if (prompt2) fd.append('prompt', prompt2);
+        uploadEl.disabled = true;
+        uploadEl.textContent = '转写中…';
+        try {
+          const resp = await fetch('/api/upload_audio', { method: 'POST', body: fd });
+          const data = await resp.json();
+          if (data.ok) {
+            const decorate = data.backend ? `【${data.backend}】` : '';
+            addMsg('assistant', `${decorate}\n${data.response || ''}`);
+          } else {
+            addMsg('assistant', '转写失败：' + (data.error || '未知错误'));
+          }
+        } catch (e) {
+          addMsg('assistant', '网络或服务异常：' + e);
+        } finally {
+          uploadEl.disabled = false;
+          uploadEl.textContent = '上传并转写';
+        }
+      });
+    </script>
+  </body>
+  </html>

@@ -10,19 +10,25 @@ D2 是一个在本地运行的多智能体助手，聚焦日历、邮件与文�
 - 会议处理智能体：`mcp_agents/meeting_agent/`，统一封装会议邮件处理流程（摘要+解析+自动入日程），主路由将优先委派。
 - 文档审查智能体：`mcp_agents/doc_review_agent/`，根据预设提示词审查附件内容，并将审查结果写入邮件草稿。
 - LLM 服务：`services/llm_service.py`，提供本地模型查询能力（`query(model, prompt)`）。
+- 语音转文字（STT）：`services/stt_service.py`，支持 Whisper 与 Fun-ASR，支持模型预下载与离线运行。
+- 图形界面（GUI）：`gui/server.py` 与 `gui/templates/index.html`，提供网页交互界面。
 
 ## 主要特性
-- 语义路由：支持 `calendar`、`email`、`summary` 三大路由与动作解析。
+- 语义路由：支持 `calendar`、`email`、`summary`、`stt` 四大路由与动作解析。
 - 会议处理：`email` 路由新增 `process_meetings` 动作，可自动识别会议邀请并在满足条件时自动加入日程。
 - 文本摘要：支持可选输出格式——要点 (`bullets`)、结构化大纲 (`outline`)、结论+建议 (`conclusion_recommendations`)。
 - 文档审查：当邮件包含“审查/审核/评审”等需求且涉及附件时，主路由可执行 `review_attachments` 动作，自动推荐审查模板，提取附件文本，生成审查报告，并写入草稿回复。
 - 关键词兜底：当用户输入包含“会议通知/会议邀请/摘要/要点”等关键词时，自动触发相应处理流程。
+- 语音转文字：支持 Whisper/Fun-ASR，本地与离线模型均可，适配常见格式（如 `wav/mp3/m4a/mp4`）。
 
 ## 运行环境
 - 操作系统：macOS（需启用系统“邮件”应用）。
 - 权限要求：允许终端/IDE 执行 `osascript` 控制“邮件”（系统设置中的“隐私与安全性”→“自动化/辅助功能”可能需要授权）。
 - Python：建议 3.9+。
 - 本地 LLM：建议本机可用的模型服务，`LLMService.query(model, prompt)` 为两参签名；若无可用模型，部分解析会退化为关键词与规则，精度会下降。
+- STT 依赖：
+  - Whisper：`pip install whisper`，并且系统需安装 `ffmpeg`（macOS 可用 `brew install ffmpeg`）。
+  - Fun-ASR：`pip install funasr modelscope`，首次加载自动缓存到本地；也可通过预下载离线运行。
 
 ## 启动方式
 - 直接运行主智能体：
@@ -30,6 +36,18 @@ D2 是一个在本地运行的多智能体助手，聚焦日历、邮件与文�
   python D2/main_agent/d2_main.py
   ```
 - 主智能体会加载 MCP 子智能体并进入交互循环。
+
+### 启动图形界面（GUI）
+- 安装依赖：
+  ```bash
+  pip install fastapi uvicorn jinja2
+  ```
+- 启动：在 `D2/` 目录下执行
+  ```bash
+  uvicorn gui.server:app --host 127.0.0.1 --port 8000 --reload
+  ```
+- 访问：打开浏览器访问 `http://127.0.0.1:8000/`
+- 特性：聊天式布局，使用 Tailwind CDN，输出整洁美观；复用核心路由与兜底逻辑（`process_prompt`）。
 
 ## 使用示例（自然语言）
 - 日历：
@@ -44,17 +62,22 @@ D2 是一个在本地运行的多智能体助手，聚焦日历、邮件与文�
 - 摘要：
   - “请用要点总结这段文本：……”
   - “把 /Users/me/report.docx 概括为结构化大纲，语言用中文”
+- 语音转文字（STT）：
+  - “把 /Users/me/audio.mp3 转成中文文字”
+  - “用 fun-asr 识别 /Users/me/meeting.wav”
 
 ## 路由与动作参考（语义解析）
-- 路由：`route<'calendar'|'email'|'summary'|'none'>`
+- 路由：`route<'calendar'|'email'|'summary'|'stt'|'none'>`
 - 常见动作：
   - `calendar`: `list`, `create`
   - `email`: `list`, `send`, `mark`, `move`, `verify`, `process_meetings`, `review_attachments`
   - `summary`: `summarize`
+  - `stt`: `transcribe`
 - 常用字段（节选）：
   - 日历：`title`, `start`, `end`, `calendar_name`
   - 邮件：`email_to`, `email_subject`, `email_body`, `email_attachments`, `email_ids`, `email_move_to`, `unread_only`, `review_requirements`, `review_preset_id`
   - 摘要：`summary_text`, `summary_file_path`, `summary_style`, `summary_length`, `summary_language<'zh'|'en'>`, `summary_format<'bullets'|'outline'|'conclusion_recommendations'>`
+  - 语音转文字：`audio_file_path`, `stt_backend<'whisper'|'funasr'>`, `stt_model`, `stt_language<'zh'|'en'>`
 
 ## 文档审查流程（review_attachments）
 该能力由独立智能体 `doc_review_agent` 提供，主路由在邮件场景下调用。
@@ -120,7 +143,42 @@ D2/
 │   │   └── presets/
 │   └── summary_agent/
 └── services/
-    └── llm_service.py
+    ├── llm_service.py
+    └── stt_service.py
+
+## 语音转文字（STT）
+- 后端选择：
+  - `whisper`（OpenAI whisper，本地运行，需 `ffmpeg`）。
+  - `funasr`（基于 ModelScope 的 Fun-ASR 管线）。
+- 离线模型预下载：
+  - Whisper：
+    ```bash
+    pip install whisper
+    brew install ffmpeg  # macOS
+    ```
+    ```python
+    from services.stt_service import STTService
+    STTService().prepare_model(backend='whisper', model='base')
+    ```
+  - Fun-ASR：
+    ```bash
+    pip install funasr modelscope
+    ```
+    ```python
+    from services.stt_service import STTService
+    # 预下载常用中文模型（如需英文将 language 改为 'en' 或指定模型ID）
+    STTService().prepare_model(backend='funasr', language='zh')
+    ```
+- 使用方式（自然语言路由）：
+  - “把 /Users/xx/audio.mp3 转成中文文字” → `route:'stt', action:'transcribe'`。
+  - “用 fun-asr 识别 /Users/xx/meeting.wav” → `route:'stt', action:'transcribe', stt_backend:'funasr'`。
+- 直接调用服务（代码）：
+  ```python
+  from services.stt_service import STTService
+  svc = STTService()
+  res = svc.transcribe('/Users/me/audio.mp3', backend='whisper', language='zh')
+  print(res['text'])
+  ```
 ```
 
 ## 开发者提示
