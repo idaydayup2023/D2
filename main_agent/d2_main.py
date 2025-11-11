@@ -23,6 +23,12 @@ class D2Agent:
                 return agent
         return None
 
+    def _find_email_agent(self):
+        for agent in self.mcp_agents:
+            if getattr(agent, 'name', '').startswith('邮件'):
+                return agent
+        return None
+
     def _resolve_range_from_prompt(self, prompt: str):
         p = prompt.strip().lower()
         today = date.today()
@@ -54,7 +60,118 @@ class D2Agent:
         """若命中日历意图则调用日历智能体并返回文本；否则返回 None。"""
         # 优先使用大模型语义解析来路由
         parsed = self._llm_semantic_parse(prompt)
-        if parsed and parsed.get('route') == 'calendar':
+        if parsed and parsed.get('route') in ('calendar', 'email'):
+            if parsed.get('route') == 'calendar':
+                cal = self._find_calendar_agent()
+                if not cal:
+                    return "抱歉，未加载到日历智能体。"
+                action = parsed.get('action')
+                if action == 'list':
+                    start_iso_raw = parsed.get('start')
+                    end_iso_raw = parsed.get('end')
+                    cal_name_raw = parsed.get('calendar_name')
+                    # 将可能的 Any/None 收敛为 Optional[str]
+                    start_iso = start_iso_raw if isinstance(start_iso_raw, str) else None
+                    end_iso = end_iso_raw if isinstance(end_iso_raw, str) else None
+                    cal_name = cal_name_raw if isinstance(cal_name_raw, str) and cal_name_raw.strip() else None
+                    try:
+                        events = cal.get_events(start=start_iso, end=end_iso, calendar_name=cal_name)
+                    except Exception as e:
+                        return f"抱歉，读取日历时出现错误：{e}"
+                    if not events:
+                        return "该时间范围内没有找到日程。"
+                    lines = []
+                    for i, ev in enumerate(events, 1):
+                        title = ev.get('title') or '未命名事件'
+                        st = ev.get('start') or ''
+                        ed = ev.get('end') or ''
+                        loc = ev.get('location') or ''
+                        line = f"{i}. {title} | {st} → {ed}" + (f" | {loc}" if loc else '')
+                        lines.append(line)
+                    return "以下是您的日程：\n" + "\n".join(lines)
+                elif action == 'create':
+                    title_raw = parsed.get('title')
+                    start_iso_raw = parsed.get('start')
+                    end_iso_raw = parsed.get('end')
+                    location_raw = parsed.get('location')
+                    cal_name_raw = parsed.get('calendar_name')
+                    title = title_raw if isinstance(title_raw, str) and title_raw.strip() else None
+                    start_iso = start_iso_raw if isinstance(start_iso_raw, str) else None
+                    end_iso = end_iso_raw if isinstance(end_iso_raw, str) else None
+                    location = location_raw if isinstance(location_raw, str) and location_raw.strip() else None
+                    cal_name = cal_name_raw if isinstance(cal_name_raw, str) and cal_name_raw.strip() else None
+                    try:
+                        ok = cal.create_event(title=title, start=start_iso, end=end_iso, location=location, calendar_name=cal_name)
+                    except Exception as e:
+                        return f"抱歉，创建日历事件时出现错误：{e}"
+                    return "已创建事件。" if ok else "事件创建失败。"
+                else:
+                    # 未指定动作，回退到模型回答
+                    return None
+            else:
+                # Email 路由
+                em = self._find_email_agent()
+                if not em:
+                    return "抱歉，未加载到邮件智能体。"
+                action = parsed.get('action')
+                if action == 'list':
+                    start_iso_raw = parsed.get('start')
+                    end_iso_raw = parsed.get('end')
+                    mailbox_raw = parsed.get('mailbox_name')
+                    unread_only_raw = parsed.get('unread_only')
+                    limit_raw = parsed.get('limit')
+                    start_iso = start_iso_raw if isinstance(start_iso_raw, str) else None
+                    end_iso = end_iso_raw if isinstance(end_iso_raw, str) else None
+                    mailbox_name = mailbox_raw if isinstance(mailbox_raw, str) and mailbox_raw.strip() else None
+                    unread_only = bool(unread_only_raw) if isinstance(unread_only_raw, (bool, int)) else False
+                    try:
+                        limit = int(limit_raw) if isinstance(limit_raw, (int, str)) and str(limit_raw).isdigit() else 20
+                    except Exception:
+                        limit = 20
+                    try:
+                        items = em.list_emails(start=start_iso, end=end_iso, mailbox_name=mailbox_name, unread_only=unread_only, limit=limit)
+                    except Exception as e:
+                        return f"抱歉，读取邮件时出现错误：{e}"
+                    if not items:
+                        return "没有找到符合条件的邮件。"
+                    lines = []
+                    for i, it in enumerate(items, 1):
+                        subj = it.get('subject') or '(无主题)'
+                        sender = it.get('sender') or ''
+                        date_s = it.get('date') or ''
+                        mailbox = it.get('mailbox') or ''
+                        read = it.get('read')
+                        tag = '未读' if read is False else '已读'
+                        lines.append(f"{i}. {subj} | {sender} | {date_s} | {mailbox} | {tag}")
+                    return "以下是匹配的邮件：\n" + "\n".join(lines)
+                elif action in ('create', 'send'):
+                    to_raw = parsed.get('email_to')
+                    cc_raw = parsed.get('email_cc')
+                    bcc_raw = parsed.get('email_bcc')
+                    subj_raw = parsed.get('email_subject')
+                    body_raw = parsed.get('email_body')
+                    # 归一化为列表/字符串
+                    def _to_list(x):
+                        if isinstance(x, list):
+                            return [str(v) for v in x if isinstance(v, (str, int)) and str(v).strip()]
+                        if isinstance(x, (str, int)):
+                            s = str(x)
+                            if "," in s:
+                                return [t.strip() for t in s.split(",") if t.strip()]
+                            return [s] if s.strip() else []
+                        return []
+                    to_list = _to_list(to_raw)
+                    cc_list = _to_list(cc_raw)
+                    bcc_list = _to_list(bcc_raw)
+                    subject = subj_raw if isinstance(subj_raw, str) else None
+                    body = body_raw if isinstance(body_raw, str) else ""
+                    try:
+                        ok = em.send_email(to=to_list, subject=subject or "(无主题)", body=body, cc=cc_list or None, bcc=bcc_list or None)
+                    except Exception as e:
+                        return f"抱歉，发送邮件时出现错误：{e}"
+                    return "已发送邮件。" if ok else "邮件发送失败。"
+                else:
+                    return None
             cal = self._find_calendar_agent()
             if not cal:
                 return "抱歉，未加载到日历智能体。"
@@ -103,28 +220,53 @@ class D2Agent:
                 return None
 
         # 若 LLM 路由未命中，回退到关键词判断
-        keywords = ['日程', '日历', '安排', '会议', '事件']
-        if not any(k in prompt for k in keywords):
+        cal_keywords = ['日程', '日历', '安排', '会议', '事件']
+        email_keywords = ['邮件', '邮箱', '收件箱', '未读', '发邮件', '邮件列表']
+        if any(k in prompt for k in cal_keywords):
+            cal = self._find_calendar_agent()
+            if not cal:
+                return None
+            start_iso, end_iso = self._resolve_range_from_prompt(prompt)
+            try:
+                events = cal.get_events(start=start_iso, end=end_iso)
+            except Exception as e:
+                return f"抱歉，读取日历时出现错误：{e}"
+            if not events:
+                return "该时间范围内没有找到日程。"
+            lines = []
+            for i, ev in enumerate(events, 1):
+                title = ev.get('title') or '未命名事件'
+                st = ev.get('start') or ''
+                ed = ev.get('end') or ''
+                loc = ev.get('location') or ''
+                line = f"{i}. {title} | {st} → {ed}" + (f" | {loc}" if loc else '')
+                lines.append(line)
+            return "以下是您的日程：\n" + "\n".join(lines)
+        elif any(k in prompt for k in email_keywords):
+            em = self._find_email_agent()
+            if not em:
+                return None
+            # 简单兜底：默认今天、如果包含“未读”则仅未读
+            unread_only = True if '未读' in prompt else False
+            start_iso, end_iso = self._resolve_range_from_prompt(prompt)
+            try:
+                items = em.list_emails(start=start_iso, end=end_iso, unread_only=unread_only, limit=20)
+            except Exception as e:
+                return f"抱歉，读取邮件时出现错误：{e}"
+            if not items:
+                return "没有找到符合条件的邮件。"
+            lines = []
+            for i, it in enumerate(items, 1):
+                subj = it.get('subject') or '(无主题)'
+                sender = it.get('sender') or ''
+                date_s = it.get('date') or ''
+                mailbox = it.get('mailbox') or ''
+                read = it.get('read')
+                tag = '未读' if read is False else '已读'
+                lines.append(f"{i}. {subj} | {sender} | {date_s} | {mailbox} | {tag}")
+            return "以下是匹配的邮件：\n" + "\n".join(lines)
+        else:
             return None
-        cal = self._find_calendar_agent()
-        if not cal:
-            return None
-        start_iso, end_iso = self._resolve_range_from_prompt(prompt)
-        try:
-            events = cal.get_events(start=start_iso, end=end_iso)
-        except Exception as e:
-            return f"抱歉，读取日历时出现错误：{e}"
-        if not events:
-            return "该时间范围内没有找到日程。"
-        lines = []
-        for i, ev in enumerate(events, 1):
-            title = ev.get('title') or '未命名事件'
-            st = ev.get('start') or ''
-            ed = ev.get('end') or ''
-            loc = ev.get('location') or ''
-            line = f"{i}. {title} | {st} → {ed}" + (f" | {loc}" if loc else '')
-            lines.append(line)
-        return "以下是您的日程：\n" + "\n".join(lines)
 
     def _llm_semantic_parse(self, prompt: str) -> Optional[Dict[str, Any]]:
         """使用大模型进行语义解析，返回结构化路由JSON。失败则返回 None。"""
@@ -139,9 +281,14 @@ class D2Agent:
             "只输出 JSON，不要输出其他文字。"
             "字段包括: route<'calendar'|'email'|'none'>, action<'list'|'create'|null>,"
             " start<YYYY-MM-DDTHH:MM:SS或null>, end<同上或null>, calendar_name<或null>,"
-            " title<创建事件标题或null>, location<或null>, remaining<boolean，用于'还有/剩余/剩下'>。"
+            " title<创建事件标题或null>, location<或null>, remaining<boolean，用于'还有/剩余/剩下'>,"
+            " mailbox_name<邮件列表查询的邮箱名或null>, unread_only<boolean或null>, limit<number或null>,"
+            " email_to<string[]或string>, email_cc<string[]或string或null>, email_bcc<string[]或string或null>,"
+            " email_subject<string或null>, email_body<string或null>。"
             " 语义规则示例：'本周还有哪些日程' -> route:'calendar', action:'list', start:现在, end:本周日23:59, remaining:true;"
-            " '帮我添加明天上午10点的会议到日历' -> route:'calendar', action:'create', title:'会议', start:明天10:00, end:明天11:00。"
+            " '帮我添加明天上午10点的会议到日历' -> route:'calendar', action:'create', title:'会议', start:明天10:00, end:明天11:00;"
+            " '列出今天未读邮件' -> route:'email', action:'list', start:今天00:00, end:今天23:59, unread_only:true;"
+            " '发一封邮件给张三，主题是会议，内容是安排如下' -> route:'email', action:'send', email_to:['zhangsan@example.com'], email_subject:'会议', email_body:'安排如下'。"
             f" 当前时间: {now_iso}。若用户未给日历名，不必填 calendar_name。"
         )
         user_msg = f"用户指令：{prompt}。请严格返回JSON。"
