@@ -33,6 +33,13 @@ def _dt_parts(dt: datetime):
 class MCPAgent:
     def __init__(self):
         self.name = "日历智能体"
+        # 简易内存缓存，加速重复查询（默认TTL 60秒）
+        self._cache = {}
+        self._cache_ttl_sec = 60
+        # 默认未来窗口（天），用于未指定时间范围的查询
+        self._default_horizon_days = 14
+        # 单次查询的最大事件数，超过则提前退出（加速大窗口场景）
+        self._max_events = 200
 
     def get_events(self, start: Optional[str] = None, end: Optional[str] = None, calendar_name: Optional[str] = None) -> List[Dict]:
         """
@@ -43,9 +50,11 @@ class MCPAgent:
         """
         # 解析时间范围
         if start is None or end is None:
+            # 默认从本周一开始，到未来窗口结束，避免一次性读取全部历史
             today = date.today()
-            start_dt = datetime.combine(today, time(hour=0, minute=0))
-            end_dt = datetime.combine(today, time(hour=23, minute=59))
+            monday = today - timedelta(days=today.weekday())
+            start_dt = datetime.combine(monday, time(hour=0, minute=0))
+            end_dt = datetime.combine(monday + timedelta(days=self._default_horizon_days), time(hour=23, minute=59))
         else:
             # 粗略 ISO 解析（支持尾部 'Z'）
             start_s = start.replace("Z", "+00:00")
@@ -64,13 +73,23 @@ class MCPAgent:
             if calendar_name else "set calList to calendars\n"
         )
 
+        # 缓存键：日历名 + 起止时间
+        cache_key = f"{calendar_name or '*'}|{start_dt.isoformat()}|{end_dt.isoformat()}"
+        ent = self._cache.get(cache_key)
+        if isinstance(ent, dict):
+            ts = ent.get('ts')
+            evs_cached = ent.get('events')
+            if isinstance(ts, datetime) and isinstance(evs_cached, list):
+                if (datetime.now() - ts).total_seconds() <= self._cache_ttl_sec:
+                    return evs_cached
+
         script = (
             _make_applescript_date_handler()
             + f"set startDate to makeDate({sy}, {sm}, {sd}, {sh}, {si})\n"
             + f"set endDate to makeDate({ey}, {em}, {ed}, {eh}, {ei})\n"
             + "tell application \"Calendar\" to launch\n"
-            + "tell application \"Calendar\" to activate\n"
-            + "delay 0.5\n"
+            + f"set maxEvents to {self._max_events}\n"
+            + "set counter to 0\n"
             + "tell application \"Calendar\"\n"
             + cal_list_decl
             + "set out to \"\"\n"
@@ -79,7 +98,10 @@ class MCPAgent:
             + "    repeat with e in evs\n"
             + "        set itemText to (summary of e) & \"|\" & (start date of e as string) & \"|\" & (end date of e as string) & \"|\" & (location of e)\n"
             + "        set out to out & itemText & \"\\n\"\n"
+            + "        set counter to counter + 1\n"
+            + "        if counter is greater than or equal to maxEvents then exit repeat\n"
             + "    end repeat\n"
+            + "    if counter is greater than or equal to maxEvents then exit repeat\n"
             + "end repeat\n"
             + "end tell\n"
             + "return out\n"
@@ -102,6 +124,8 @@ class MCPAgent:
                 "end": end_str,
                 "location": location,
             })
+        # 写入缓存
+        self._cache[cache_key] = {"ts": datetime.now(), "events": events}
         return events
 
     def create_event(self, title: str, start: str, end: str, location: Optional[str] = None, calendar_name: Optional[str] = None) -> bool:
@@ -142,8 +166,6 @@ class MCPAgent:
             + f"set startDate to makeDate({sy}, {sm}, {sd}, {sh}, {si})\n"
             + f"set endDate to makeDate({ey}, {em}, {ed}, {eh}, {ei})\n"
             + "tell application \"Calendar\" to launch\n"
-            + "tell application \"Calendar\" to activate\n"
-            + "delay 0.5\n"
             + "tell application \"Calendar\"\n"
             + cal_selector
             + f"make new event at theCal with properties {props}\n"

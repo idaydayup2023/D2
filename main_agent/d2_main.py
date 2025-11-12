@@ -44,6 +44,12 @@ class D2Agent:
                 return agent
         return None
 
+    def _find_meeting_minutes_agent(self):
+        for agent in self.mcp_agents:
+            if getattr(agent, 'name', '').startswith('会议纪要'):
+                return agent
+        return None
+
     def _find_doc_review_agent(self):
         for agent in self.mcp_agents:
             name = getattr(agent, 'name', '')
@@ -80,6 +86,41 @@ class D2Agent:
 
     def _maybe_route_to_calendar(self, prompt: str):
         """若命中日历意图则调用日历智能体并返回文本；否则返回 None。"""
+        # 快路径：对常见的日历查询先用关键词路由，避免不必要的 LLM 调用带来的延迟
+        try:
+            cal_fast_keywords = ['日程', '日历', '安排', '事件']  # 排除 '会议' 以减少语义冲突
+            email_mentions = ['邮件', '邮箱', '收件箱']
+            if any(k in prompt for k in cal_fast_keywords) and not any(k in prompt for k in email_mentions):
+                cal = self._find_calendar_agent()
+                if cal:
+                    start_iso, end_iso = self._resolve_range_from_prompt(prompt)
+                    # 若未明确时间关键词，则默认使用“本周起至未来窗口”的范围
+                    p = prompt.strip().lower()
+                    if not any(k in p for k in ['今天', '明天', '本周']):
+                        today = date.today()
+                        monday = today - timedelta(days=today.weekday())
+                        horizon_days = getattr(cal, '_default_horizon_days', 14)
+                        start_iso = datetime.combine(monday, time(0, 0, 0)).strftime('%Y-%m-%dT%H:%M:%S')
+                        end_iso = datetime.combine(monday + timedelta(days=horizon_days), time(23, 59, 0)).strftime('%Y-%m-%dT%H:%M:%S')
+                    try:
+                        events = cal.get_events(start=start_iso, end=end_iso)
+                    except Exception as e:
+                        return f"抱歉，读取日历时出现错误：{e}"
+                    if not events:
+                        return "该时间范围内没有找到日程。"
+                    lines = []
+                    for i, ev in enumerate(events, 1):
+                        title = ev.get('title') or '未命名事件'
+                        st = ev.get('start') or ''
+                        ed = ev.get('end') or ''
+                        loc = ev.get('location') or ''
+                        line = f"{i}. {title} | {st} → {ed}" + (f" | {loc}" if loc else '')
+                        lines.append(line)
+                    return "以下是您的日程：\n" + "\n".join(lines)
+        except Exception:
+            # 快路径异常不影响后续 LLM 路由
+            pass
+
         # 优先使用大模型语义解析来路由
         parsed = self._llm_semantic_parse(prompt)
         if parsed and parsed.get('route') in ('calendar', 'email', 'summary', 'stt'):
@@ -1012,6 +1053,33 @@ class D2Agent:
                 return "抱歉，当前未连接大模型服务，可使用日历/邮件/摘要/语音转文字关键词功能。"
         except Exception as e:
             return f"抱歉，处理输入时出现错误：{e}"
+
+    def polish_text(self, text: str, style: str = 'spoken_zh') -> str:
+        """使用大模型对输出进行口语化润色，默认中文口语风格。"""
+        try:
+            best_model = self.llm_service.get_best_model()
+            if not best_model:
+                return text
+            original = str(text or '')
+            if not original.strip():
+                return original
+            if style == 'spoken_zh':
+                prompt = (
+                    "请将下面的文本改写为更口语化、自然、简洁的中文回答，适合直接朗读并呈现在聊天窗口。"
+                    "保留所有关键信息与步骤，避免冗长、过多条目或复杂格式。\n\n"
+                    "文本：\n" + original + "\n\n"
+                    "仅输出改写后的文本。"
+                )
+            else:
+                prompt = (
+                    "Please rewrite the following text to be more conversational, natural, and concise."
+                    " Keep all key information. Return only the revised text.\n\n"
+                    + original
+                )
+            revised = self.llm_service.query(best_model, prompt)
+            return str(revised).strip() or original
+        except Exception:
+            return text
 
     def load_mcp_agents(self):
         print("正在加载MCP智能体...")

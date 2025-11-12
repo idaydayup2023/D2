@@ -4,10 +4,20 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title }}</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <style>
       .msg { white-space: pre-wrap; }
       .shadow-soft { box-shadow: 0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -2px rgba(0,0,0,.05); }
+      .drop-overlay {
+        position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+        background: rgba(79,70,229,0.06); border: 2px dashed rgba(79,70,229,0.5); z-index: 50;
+        backdrop-filter: blur(2px);
+      }
+      .drop-overlay .label {
+        color: #4f46e5; background: #fff; border: 1px solid #c7d2fe; border-radius: 8px;
+        padding: 10px 14px; font-weight: 600; box-shadow: 0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -2px rgba(0,0,0,.05);
+      }
     </style>
   </head>
   <body class="bg-gray-100">
@@ -24,48 +34,18 @@
           <div id="chat" class="bg-white rounded-lg p-4 shadow-soft h-96 overflow-y-auto">
             <!-- 消息列表 -->
           </div>
-          <div class="mt-4 flex gap-2">
-            <input id="prompt" type="text" class="flex-1 border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="请输入您的问题，例如：列出今天的日程，或将/Users/xx/audio.wav转文字" />
+          <div class="mt-4 flex gap-2 items-center">
+            <input id="prompt" type="text" class="flex-1 border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="请输入指令，例如：生成会议纪要、总结附件内容、转写音频等" />
             <button id="send" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-md">发送</button>
+            <button id="micToggle" class="bg-pink-600 hover:bg-pink-700 text-white px-3 py-2 rounded-md">🎤 开始录音</button>
+            <span id="micStatus" class="text-xs text-gray-500">未录音</span>
+            <canvas id="micWave" width="160" height="28" class="border border-indigo-200 rounded"></canvas>
           </div>
-
-          <div class="mt-6 bg-white rounded-lg p-4 shadow-soft">
-            <h2 class="text-lg font-semibold text-gray-700">音频上传并转写</h2>
-            <p class="text-sm text-gray-500">支持 wav/mp3/m4a/mp4/aac/flac/ogg/webm。可选后端与语言。</p>
-            <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <label class="text-sm text-gray-600">选择音频文件</label>
-                <input id="audio" type="file" accept="audio/*,video/mp4,video/webm" class="mt-1 block w-full" />
-              </div>
-              <div>
-                <label class="text-sm text-gray-600">后端</label>
-                <select id="backend" class="mt-1 w-full border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                  <option value="">自动</option>
-                  <option value="whisper">Whisper</option>
-                  <option value="funasr">Fun-ASR</option>
-                </select>
-              </div>
-              <div>
-                <label class="text-sm text-gray-600">语言提示</label>
-                <select id="language" class="mt-1 w-full border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                  <option value="">自动</option>
-                  <option value="zh">中文</option>
-                  <option value="en">英文</option>
-                </select>
-              </div>
-              <div>
-                <label class="text-sm text-gray-600">模型（可选）</label>
-                <input id="model" type="text" placeholder="如 whisper: base / funasr: 模型ID" class="mt-1 w-full border rounded-md px-3 py-2" />
-              </div>
-              <div class="md:col-span-2">
-                <label class="text-sm text-gray-600">提示词（可选，Whisper 支持 initial_prompt）</label>
-                <input id="prompt2" type="text" placeholder="如：人名缩写或领域专有词" class="mt-1 w-full border rounded-md px-3 py-2" />
-              </div>
-            </div>
-            <div class="mt-3">
-              <button id="upload" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md">上传并转写</button>
-            </div>
+          <div class="mt-2 flex items-center gap-3">
+            <input id="attachments" type="file" multiple accept=".docx,.txt,.md,audio/*,video/mp4,video/webm" class="block" />
+            <span class="text-xs text-gray-400">可选：上传 .docx / 音频 / 文本等附件</span>
           </div>
+          <div id="attachmentsList" class="mt-2 text-sm text-gray-600"></div>
         </div>
       </main>
 
@@ -74,16 +54,150 @@
       </footer>
     </div>
 
+    <div id="dropOverlay" class="drop-overlay"><div class="label">拖拽文件到此处添加到对话</div></div>
+
     <script>
       const chatEl = document.getElementById('chat');
       const promptEl = document.getElementById('prompt');
       const sendEl = document.getElementById('send');
-      const audioEl = document.getElementById('audio');
-      const backendEl = document.getElementById('backend');
-      const languageEl = document.getElementById('language');
-      const modelEl = document.getElementById('model');
-      const prompt2El = document.getElementById('prompt2');
-      const uploadEl = document.getElementById('upload');
+      const micToggleEl = document.getElementById('micToggle');
+      const micStatusEl = document.getElementById('micStatus');
+      const micWaveEl = document.getElementById('micWave');
+      const attachmentsEl = document.getElementById('attachments');
+      const attachmentsListEl = document.getElementById('attachmentsList');
+      const dropOverlayEl = document.getElementById('dropOverlay');
+      const attachedFiles = [];
+
+      // 麦克风录音状态
+      let micStream = null;
+      let mediaRecorder = null;
+      let micChunks = [];
+      let micRecording = false;
+      let micAudioCtx = null;
+      let micAnalyser = null;
+      let micWaveRAF = null;
+      let micStartAt = 0;
+      let micTimerId = null;
+      // 录音停止守卫与编码类型（用于 onstop/fallback）
+      let micChosenMime = '';
+      let micStopping = false;
+      let micStopGuardId = null;
+      // Web Speech 极速转写（浏览器端实时识别）
+      let wsr = null; // SpeechRecognition 实例
+      let wsrActive = false;
+      let wsrInterim = '';
+      let wsrFinal = '';
+      let micAskedViaWSR = false; // 已用极速转写触发过 ask
+      // 语音指令标记与播报
+      let lastAskWasVoice = false;
+
+      function startWebSpeechIfAvailable(lang = 'zh-CN') {
+        try {
+          const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (!SR) return false;
+          wsr = new SR();
+          wsr.lang = lang;
+          wsr.interimResults = true;
+          wsr.continuous = true;
+          wsrInterim = '';
+          wsrFinal = '';
+          micAskedViaWSR = false;
+          wsr.onstart = () => { wsrActive = true; };
+          wsr.onresult = (evt) => {
+            let interim = '';
+            let finalText = '';
+            for (let i = evt.resultIndex; i < evt.results.length; ++i) {
+              const res = evt.results[i];
+              if (res.isFinal) finalText += res[0].transcript;
+              else interim += res[0].transcript;
+            }
+            if (interim) wsrInterim = interim;
+            if (finalText) wsrFinal += finalText;
+          };
+          wsr.onerror = (e) => { };
+          wsr.onend = () => { wsrActive = false; };
+          wsr.start();
+          return true;
+        } catch (_) { return false; }
+      }
+
+      // 统一对话：所有输入与附件通过一个入口处理
+      function renderAttachments() {
+        const files = [];
+        if (attachmentsEl && attachmentsEl.files) {
+          for (const f of attachmentsEl.files) files.push({ f, source: '选择' });
+        }
+        attachedFiles.forEach((f, i) => files.push({ f, source: '拖拽/粘贴', idx: i }));
+        if (!files.length) {
+          attachmentsListEl.textContent = '';
+          return;
+        }
+        const items = files.map((it) => {
+          const name = it.f.name || '未命名';
+          const sizeKB = Math.round((it.f.size || 0) / 1024);
+          const src = it.source;
+          const removeBtn = (it.idx !== undefined)
+            ? `<button data-idx="${it.idx}" class="ml-2 text-xs text-red-600 hover:underline">移除</button>`
+            : '';
+          return `<div class="inline-flex items-center bg-gray-50 border border-gray-200 rounded px-2 py-1 mr-2 mb-2">${name}（${sizeKB}KB，${src}）${removeBtn}</div>`;
+        }).join('');
+        attachmentsListEl.innerHTML = `<div class="text-gray-700">已添加附件：</div><div class="mt-1">${items}</div>`;
+        attachmentsListEl.querySelectorAll('button[data-idx]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const idx = Number(btn.getAttribute('data-idx'));
+            if (!Number.isNaN(idx)) {
+              attachedFiles.splice(idx, 1);
+              renderAttachments();
+            }
+          });
+        });
+      }
+
+      function addAttachmentFile(file) {
+        if (!file) return;
+        attachedFiles.push(file);
+        renderAttachments();
+      }
+
+      attachmentsEl?.addEventListener('change', () => {
+        renderAttachments();
+      });
+
+      // 拖拽添加附件
+      document.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropOverlayEl.style.display = 'flex';
+      });
+      document.addEventListener('dragleave', (e) => {
+        dropOverlayEl.style.display = 'none';
+      });
+      document.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropOverlayEl.style.display = 'none';
+        const dt = e.dataTransfer;
+        if (!dt) return;
+        const items = dt.items || [];
+        if (items.length) {
+          for (const item of items) {
+            if (item.kind === 'file') {
+              const file = item.getAsFile();
+              addAttachmentFile(file);
+            }
+          }
+        } else if (dt.files && dt.files.length) {
+          for (const file of dt.files) addAttachmentFile(file);
+        }
+        
+      });
+
+      // 粘贴添加附件（若剪贴板包含文件），否则保持默认文本粘贴到输入框
+      promptEl.addEventListener('paste', (e) => {
+        const cd = e.clipboardData;
+        if (cd && cd.files && cd.files.length) {
+          e.preventDefault();
+          for (const file of cd.files) addAttachmentFile(file);
+        }
+      });
 
       function addMsg(role, text) {
         const wrap = document.createElement('div');
@@ -103,24 +217,46 @@
         chatEl.scrollTop = chatEl.scrollHeight;
       }
 
-      async function ask(prompt) {
+      function speakText(text, lang = 'zh-CN') {
+        try {
+          if (!('speechSynthesis' in window)) return;
+          const t = String(text || '').trim();
+          if (!t) return;
+          const u = new SpeechSynthesisUtterance(t);
+          u.lang = lang;
+          u.rate = 1.0;
+          u.pitch = 1.0;
+          try { window.speechSynthesis.cancel(); } catch(_){}
+          window.speechSynthesis.speak(u);
+        } catch(_) {}
+      }
+
+      async function ask(prompt, options = {}) {
+        const fromVoice = !!(options && options.fromVoice);
+        lastAskWasVoice = fromVoice;
         addMsg('user', prompt);
         sendEl.disabled = true;
         sendEl.textContent = '发送中…';
         try {
-          const resp = await fetch('/api/ask', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt })
-          });
+          const fd = new FormData();
+          fd.append('prompt', prompt);
+          const files = [];
+          if (attachmentsEl?.files?.length) {
+            for (const f of attachmentsEl.files) files.push(f);
+          }
+          for (const f of attachedFiles) files.push(f);
+          for (const file of files) fd.append('attachments', file);
+          const resp = await fetch('/api/dialog', { method: 'POST', body: fd });
           const data = await resp.json();
           if (data.ok) {
-            addMsg('assistant', data.response || '');
+            const respText = data.response || '';
+            addMsg('assistant', respText);
+            if (lastAskWasVoice) {
+              speakText(respText);
+            }
           } else {
-            addMsg('assistant', '发生错误：' + (data.error || '未知错误'));
           }
         } catch (e) {
-          addMsg('assistant', '网络或服务异常：' + e);
         } finally {
           sendEl.disabled = false;
           sendEl.textContent = '发送';
@@ -138,36 +274,252 @@
         if (e.key === 'Enter') sendEl.click();
       });
 
-      uploadEl.addEventListener('click', async () => {
-        const file = audioEl.files[0];
-        if (!file) { addMsg('assistant', '请先选择音频文件'); return; }
-        const backend = backendEl.value || '';
-        const language = languageEl.value || '';
-        const model = modelEl.value.trim();
-        const prompt2 = prompt2El.value.trim();
-        addMsg('user', `上传音频：${file.name}（后端：${backend || 'auto'}，语言：${language || 'auto'}）`);
-        const fd = new FormData();
-        fd.append('file', file);
-        if (backend) fd.append('backend', backend);
-        if (language) fd.append('language', language);
-        if (model) fd.append('model', model);
-        if (prompt2) fd.append('prompt', prompt2);
-        uploadEl.disabled = true;
-        uploadEl.textContent = '转写中…';
+      // 移除独立功能区块，统一通过 /api/dialog 与大模型语义路由
+      async function startMic() {
+        
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          return;
+        }
+        if (typeof MediaRecorder === 'undefined') {
+          return;
+        }
+        micToggleEl.disabled = true;
+        micStatusEl.textContent = '请求麦克风权限…';
+
         try {
-          const resp = await fetch('/api/upload_audio', { method: 'POST', body: fd });
-          const data = await resp.json();
-          if (data.ok) {
-            const decorate = data.backend ? `【${data.backend}】` : '';
-            addMsg('assistant', `${decorate}\n${data.response || ''}`);
-          } else {
-            addMsg('assistant', '转写失败：' + (data.error || '未知错误'));
+          if (navigator.permissions && navigator.permissions.query) {
+            const perm = await navigator.permissions.query({ name: 'microphone' });
+            if (perm.state === 'denied') {
+              micToggleEl.disabled = false;
+              micStatusEl.textContent = '未录音';
+              return;
+            }
           }
+
+          // getUserMedia 加超时保护，避免权限或环境异常导致卡住
+          const getUM = async (constraints, timeoutMs = 10000) => {
+            return await Promise.race([
+              navigator.mediaDevices.getUserMedia(constraints),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('getUserMedia 超时')), timeoutMs)),
+            ]);
+          };
+          // 获取音频流（带约束 -> 失败则回退到基础音频）
+          try {
+            micStream = await getUM({
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                channelCount: 1,
+              }
+            });
+            
+          } catch (err) {
+            
+            micStream = await getUM({ audio: true });
+          }
+
+          // 选择编码类型
+          let chosenMime = '';
+          try {
+            if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+              chosenMime = 'audio/webm;codecs=opus';
+            } else if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm')) {
+              chosenMime = 'audio/webm';
+            } else if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/mp4;codecs=mp4a.40.2')) {
+              chosenMime = 'audio/mp4;codecs=mp4a.40.2';
+            }
+          } catch (_) {}
+
+          // 记住选择的编码，供 onstop 和回退使用
+          micChosenMime = chosenMime || '';
+
+          // 创建录音器（失败则回退到默认构造）
+          try {
+            mediaRecorder = chosenMime ? new MediaRecorder(micStream, { mimeType: chosenMime }) : new MediaRecorder(micStream);
+          } catch (e1) {
+            mediaRecorder = new MediaRecorder(micStream);
+          }
+
+          micChunks = [];
+          mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) micChunks.push(e.data); };
+          mediaRecorder.onstart = () => { };
+          mediaRecorder.onerror = (e) => { 
+          };
+          mediaRecorder.onstop = () => {
+            try {
+              const outType = (micChosenMime || 'audio/webm').split(';')[0] || 'audio/webm';
+              const ext = outType.includes('mp4') ? 'm4a' : (outType.includes('webm') ? 'webm' : 'wav');
+              const blob = new Blob(micChunks, { type: outType });
+              const fname = `mic_${Date.now()}.${ext}`;
+              const file = new File([blob], fname, { type: outType });
+              if (!micAskedViaWSR) {
+                const promptText = (promptEl.value || '').trim();
+                if (promptText) { ask(promptText, { fromVoice: true }); }
+              }
+            } catch (err) {
+            }
+
+            // 释放资源
+            try { micStream.getTracks().forEach(t => t.stop()); } catch(_){}
+            micStream = null; mediaRecorder = null; micChunks = []; micRecording = false;
+            micStopping = false;
+            if (micStopGuardId) { clearTimeout(micStopGuardId); micStopGuardId = null; }
+            micToggleEl.textContent = '🎤 开始录音';
+            micStatusEl.textContent = '未录音';
+            if (micWaveRAF) cancelAnimationFrame(micWaveRAF);
+            micWaveRAF = null;
+            try { micAudioCtx && micAudioCtx.close(); } catch(_){}
+            micAudioCtx = null; micAnalyser = null;
+            if (micTimerId) { clearInterval(micTimerId); micTimerId = null; }
+            const ctx = micWaveEl.getContext('2d');
+            ctx.clearRect(0,0,micWaveEl.width,micWaveEl.height);
+            micToggleEl.disabled = false;
+          };
+
+          // 使用 timeslice 便于实时生成数据块
+          mediaRecorder.start(250);
+          micRecording = true;
+          micToggleEl.textContent = '⏹️ 结束录音';
+          micStatusEl.textContent = '录音中 00:00';
+          // 开始录音后立刻允许点击停止
+          micToggleEl.disabled = false;
+          // 并行启动极速转写（若浏览器支持）
+          if (!startWebSpeechIfAvailable('zh-CN')) {
+          }
+
+          // 计时器
+          micStartAt = Date.now();
+          micTimerId = setInterval(() => {
+            const s = Math.floor((Date.now() - micStartAt)/1000);
+            const mm = String(Math.floor(s/60)).padStart(2,'0');
+            const ss = String(s%60).padStart(2,'0');
+            micStatusEl.textContent = `录音中 ${mm}:${ss}`;
+          }, 500);
+
+          // 波形可视化
+          micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          try {
+            if (typeof micAudioCtx.resume === 'function') { await micAudioCtx.resume(); }
+          } catch(_){}
+          const source = micAudioCtx.createMediaStreamSource(micStream);
+          micAnalyser = micAudioCtx.createAnalyser();
+          micAnalyser.fftSize = 512;
+          micAnalyser.smoothingTimeConstant = 0.8;
+          source.connect(micAnalyser);
+          const ctx = micWaveEl.getContext('2d');
+          const w = micWaveEl.width; const h = micWaveEl.height;
+          const buffer = new Uint8Array(micAnalyser.fftSize);
+          const draw = () => {
+            micAnalyser.getByteTimeDomainData(buffer);
+            ctx.clearRect(0,0,w,h);
+            ctx.beginPath();
+            const step = w / buffer.length;
+            for (let i=0;i<buffer.length;i++) {
+              const v = (buffer[i]-128)/128;
+              const y = h/2 + v*(h/2-2);
+              const x = i*step;
+              if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+            }
+            ctx.strokeStyle = '#4f46e5';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            micWaveRAF = requestAnimationFrame(draw);
+          };
+          draw();
+          
+          // 保险：当录音器真正进入 start 状态时也确保按钮可用
+          try {
+            mediaRecorder.onstart = () => {
+              micToggleEl.disabled = false;
+            };
+          } catch(_) {}
         } catch (e) {
-          addMsg('assistant', '网络或服务异常：' + e);
-        } finally {
-          uploadEl.disabled = false;
-          uploadEl.textContent = '上传并转写';
+          micRecording = false;
+          micToggleEl.textContent = '🎤 开始录音';
+          micStatusEl.textContent = '未录音';
+          micToggleEl.disabled = false;
+
+          // 回退方案：提示在外部浏览器打开，并触发带 capture 的文件选择以录音/上传
+          try {
+            const url = window.location.origin;
+            if (attachmentsEl) {
+              attachmentsEl.setAttribute('accept', 'audio/*');
+              attachmentsEl.setAttribute('capture', 'microphone');
+              attachmentsEl.click();
+            }
+          } catch (_) {}
+
+          // 设备检测信息，帮助定位问题
+          try {
+            if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+              const devs = await navigator.mediaDevices.enumerateDevices();
+              const mics = devs.filter(d => d.kind === 'audioinput');
+            }
+          } catch(_) {}
+        }
+      }
+
+      function stopMic() {
+        // 防卡死：立即更新 UI，并尝试请求最后一块数据与停止所有音轨
+        try {
+          micStatusEl.textContent = '正在保存音频…';
+          micToggleEl.disabled = true;
+          micStopping = true;
+          // 优先结束浏览器极速转写，并在 1 秒内秒回
+          try {
+            if (wsrActive && wsr) { wsr.stop(); }
+            const fastText = (wsrFinal || wsrInterim || '').trim();
+            if (fastText && !micAskedViaWSR) {
+              micAskedViaWSR = true;
+              ask(fastText, { fromVoice: true });
+            }
+          } catch(_) {}
+          // 停止动画，避免继续绘制
+          if (micWaveRAF) { cancelAnimationFrame(micWaveRAF); micWaveRAF = null; }
+          // 请求最后数据块
+          try { if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.requestData(); } catch(_){}
+          // 停止录音器
+          try { if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch(_){}
+          // 停止所有音轨（部分浏览器 stop() 不会立刻触发 onstop）
+          try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch(_){}
+
+          // 守卫：1.5s 内未触发 onstop，则手动收尾（使用已收集的 chunks）
+          micStopGuardId = setTimeout(() => {
+            if (!micStopping) return; // onstop 已完成
+            try {
+              const outType = (micChosenMime || 'audio/webm').split(';')[0] || 'audio/webm';
+              const ext = outType.includes('mp4') ? 'm4a' : (outType.includes('webm') ? 'webm' : 'wav');
+              const blob = new Blob(micChunks, { type: outType });
+              const fname = `mic_${Date.now()}.${ext}`;
+              const file = new File([blob], fname, { type: outType });
+              if (!micAskedViaWSR) {
+                const promptText = (promptEl.value || '').trim();
+                if (promptText) { ask(promptText, { fromVoice: true }); }
+              }
+            } catch (err) {
+              
+            }
+
+            // 统一清理
+            micStopping = false; micRecording = false;
+            try { if (micTimerId) { clearInterval(micTimerId); micTimerId = null; } } catch(_){}
+            try { micAudioCtx && micAudioCtx.close(); } catch(_){}
+            micAudioCtx = null; micAnalyser = null; mediaRecorder = null; micStream = null; micChunks = [];
+            const ctx = micWaveEl.getContext('2d');
+            ctx.clearRect(0,0,micWaveEl.width,micWaveEl.height);
+            micToggleEl.textContent = '🎤 开始录音';
+            micStatusEl.textContent = '未录音';
+            micToggleEl.disabled = false;
+          }, 1500);
+        } catch(_) {}
+      }
+
+      micToggleEl.addEventListener('click', () => {
+        if (micRecording) {
+          stopMic();
+        } else {
+          startMic();
         }
       });
     </script>
