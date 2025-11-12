@@ -44,9 +44,9 @@ D2 是一个在本地运行的多智能体助手，聚焦日历、邮件与文�
   ```
 - 启动：在 `D2/` 目录下执行
   ```bash
-  uvicorn gui.server:app --host 127.0.0.1 --port 8000 --reload
+  uvicorn gui.server:app --host 127.0.0.1 --port 8186 --reload
   ```
-- 访问：打开浏览器访问 `http://127.0.0.1:8000/`
+- 访问：打开浏览器访问 `http://127.0.0.1:8186/`
 - 特性：聊天式布局，使用 Tailwind CDN，输出整洁美观；复用核心路由与兜底逻辑（`process_prompt`）。
 
 ## 版本变更
