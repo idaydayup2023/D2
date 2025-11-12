@@ -1,5 +1,5 @@
 {
-  "python.defaultInterpreterPath": "/Users/daibo/MCPs/D2/.venv/bin/python",
+  "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
   "python.terminal.activateEnvironment": true,
   "python.analysis.typeCheckingMode": "basic"
 }
