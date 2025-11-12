@@ -38,9 +38,13 @@ D2 是一个在本地运行的多智能体助手，聚焦日历、邮件与文�
 - 主智能体会加载 MCP 子智能体并进入交互循环。
 
 ### 启动图形界面（GUI）
-- 安装依赖：
+- 安装依赖（推荐）：
   ```bash
-  pip install fastapi uvicorn jinja2
+  pip install -r requirements.txt
+  ```
+- 或手动安装：
+  ```bash
+  pip install fastapi uvicorn jinja2 python-multipart
   ```
 - 启动：在 `D2/` 目录下执行
   ```bash
