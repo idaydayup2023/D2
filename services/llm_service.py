@@ -1,6 +1,5 @@
 import os
-import ollama
-from openai import OpenAI
+import importlib
 
 class LLMService:
     LEVELS = {"debug": 10, "info": 20, "error": 40, "none": 100}
@@ -25,7 +24,8 @@ class LLMService:
 
     def discover_ollama_models(self):
         try:
-            response = ollama.list()
+            ollama_mod = importlib.import_module('ollama')
+            response = ollama_mod.list()
             self._log("debug", f"Ollama 原始响应: {response}")
             if 'models' in response:
                 model_list = response['models']
@@ -59,7 +59,9 @@ class LLMService:
 
     def discover_lm_studio_models(self):
         try:
-            client = OpenAI(base_url="http://localhost:1234/v1", api_key="not-needed")
+            openai_mod = importlib.import_module('openai')
+            OpenAICls = getattr(openai_mod, 'OpenAI')
+            client = OpenAICls(base_url="http://localhost:1234/v1", api_key="not-needed")
             models = client.models.list()
             for model in models.data:
                 self.available_models.append(f"lm_studio:{model.id}")
@@ -78,10 +80,13 @@ class LLMService:
         try:
             service, model_name = model.split(':', 1)
             if service == 'ollama':
-                response = ollama.chat(model=model_name, messages=[{'role': 'user', 'content': prompt}])
+                ollama_mod = importlib.import_module('ollama')
+                response = ollama_mod.chat(model=model_name, messages=[{'role': 'user', 'content': prompt}])
                 return response['message']['content']
             elif service == 'lm_studio':
-                client = OpenAI(base_url="http://localhost:1234/v1", api_key="not-needed")
+                openai_mod = importlib.import_module('openai')
+                OpenAICls = getattr(openai_mod, 'OpenAI')
+                client = OpenAICls(base_url="http://localhost:1234/v1", api_key="not-needed")
                 completion = client.chat.completions.create(
                     model=model_name,
                     messages=[

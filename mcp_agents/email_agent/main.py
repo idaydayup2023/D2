@@ -37,6 +37,8 @@ def _dt_parts(dt: datetime):
 class MCPAgent:
     def __init__(self):
         self.name = "邮件智能体"
+        self._cache = {}
+        self._cache_ttl_sec = 45
 
     def list_emails(
         self,
@@ -79,6 +81,16 @@ class MCPAgent:
 
         filter_unread = " and read status is false" if unread_only else ""
 
+        # 缓存键
+        cache_key = f"list|{start or '*'}|{end or '*'}|{mailbox_name or '*'}|{unread_only}|{max(1, limit)}"
+        ent = self._cache.get(cache_key)
+        if isinstance(ent, dict):
+            ts = ent.get('ts')
+            val = ent.get('val')
+            from datetime import datetime
+            if ts and val and (datetime.now().timestamp() - ts) <= self._cache_ttl_sec:
+                return val
+
         script = (
             _make_applescript_date_handler()
             + f"set startDate to makeDate({sy}, {sm}, {sd}, {sh}, {si})\n"
@@ -86,7 +98,7 @@ class MCPAgent:
             + mb_decl
             + "tell application \"Mail\" to launch\n"
             + "tell application \"Mail\" to activate\n"
-            + "delay 0.5\n"
+            + "delay 0.2\n"
             + "tell application \"Mail\"\n"
             + "set out to \"\"\n"
             + "set added to 0\n"
@@ -114,11 +126,11 @@ class MCPAgent:
             + "        set boxName to name of mb\n"
             + "        set out to out & theSubject & \"|\" & theSender & \"|\" & theDate & \"|\" & theId & \"|\" & isRead & \"|\" & boxName & \"\n\"\n"
             + "        set added to added + 1\n"
-            + "        if added ≥ "
+            + "        if added >= "
             + str(max(1, limit))
             + " then exit repeat\n"
             + "    end repeat\n"
-            + "    if added ≥ "
+            + "    if added >= "
             + str(max(1, limit))
             + " then exit repeat\n"
             + "end repeat\n"
@@ -146,6 +158,12 @@ class MCPAgent:
                 "read": True if str(read_val).lower() in ["true", "yes"] else False,
                 "mailbox": mailbox,
             })
+        # 写入缓存
+        try:
+            from datetime import datetime
+            self._cache[cache_key] = {"ts": datetime.now().timestamp(), "val": emails}
+        except Exception:
+            pass
         return emails
 
     def get_messages_by_ids(self, message_ids: List[str]) -> List[Dict[str, Any]]:
@@ -163,6 +181,14 @@ class MCPAgent:
             return f"{{{inner}}}"
 
         id_list = _ids_to_list(ids)
+        # 缓存键（无序集合，避免顺序影响）
+        cache_key = "detail|" + ",".join(sorted(ids))
+        ent = self._cache.get(cache_key)
+        if isinstance(ent, dict):
+            ts = ent.get('ts'); val = ent.get('val')
+            from datetime import datetime
+            if ts and val and (datetime.now().timestamp() - ts) <= self._cache_ttl_sec:
+                return val
 
         # AppleScript：提供文本替换工具，清洗正文中的竖线与换行，避免解析冲突
         script = (
@@ -242,6 +268,11 @@ class MCPAgent:
                 "cc": [x.strip() for x in cc_addrs.split(",") if x.strip()],
                 "body": body_safe.replace("␤", "\n"),
             })
+        try:
+            from datetime import datetime
+            self._cache[cache_key] = {"ts": datetime.now().timestamp(), "val": details}
+        except Exception:
+            pass
         return details
 
     def get_account_addresses(self) -> List[str]:
@@ -374,6 +405,13 @@ class MCPAgent:
             if res.returncode != 0:
                 return {"changed": 0, "error": res.stderr.strip()}
             s = res.stdout.strip()
+            # 失效相关缓存
+            try:
+                for k in list(self._cache.keys()):
+                    if k.startswith("list|") or k.startswith("detail|"):
+                        del self._cache[k]
+            except Exception:
+                pass
             return {"changed": int(s) if s.isdigit() else 0}
         except Exception as e:
             return {"changed": 0, "error": str(e)}
@@ -433,6 +471,13 @@ class MCPAgent:
             if res.returncode != 0:
                 return {"moved": 0, "error": res.stderr.strip()}
             s = res.stdout.strip()
+            # 失效相关缓存
+            try:
+                for k in list(self._cache.keys()):
+                    if k.startswith("list|") or k.startswith("detail|"):
+                        del self._cache[k]
+            except Exception:
+                pass
             return {"moved": int(s) if s.isdigit() else 0}
         except Exception as e:
             return {"moved": 0, "error": str(e)}

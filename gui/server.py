@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
 
 from main_agent.d2_main import D2Agent
 from mcp_agents.meeting_minutes_agent.main import MCPAgent as MeetingMinutesAgent
@@ -16,6 +17,14 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app = FastAPI(title="D2 助理 GUI")
 agent = D2Agent()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # 可选静态资源目录（目前主要使用 CDN 样式）
 static_dir = os.path.join(BASE_DIR, "static")
 if os.path.isdir(static_dir):
@@ -23,6 +32,26 @@ if os.path.isdir(static_dir):
 
 upload_dir = os.path.join(BASE_DIR, "uploads")
 os.makedirs(upload_dir, exist_ok=True)
+
+def prune_uploads(root: str, max_age_hours: int = 24):
+    import time
+    now = time.time()
+    try:
+        for fn in os.listdir(root):
+            try:
+                p = os.path.join(root, fn)
+                st = os.stat(p)
+                if now - st.st_mtime > max_age_hours * 3600:
+                    os.remove(p)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+prune_uploads(upload_dir, 24)
+
+MAX_AUDIO_SIZE = 50 * 1024 * 1024
+MAX_DOC_SIZE = 10 * 1024 * 1024
 
 # 简洁 SVG 图标与 /favicon 兼容处理
 FAVICON_SVG = (
@@ -74,6 +103,31 @@ async def vite_client_stub():
 async def health():
     return {"ok": True, "name": agent.name}
 
+@app.on_event("startup")
+async def warmup():
+    try:
+        # 预热：列出今天未读邮件（10条），建立缓存；预热日历（默认范围）
+        em_fn = getattr(agent, "_find_email_agent", None)
+        cal_fn = getattr(agent, "_find_calendar_agent", None)
+        if callable(em_fn):
+            em = em_fn()
+            from datetime import date, datetime, time
+            today = date.today()
+            start_iso = datetime.combine(today, time(0,0,0)).strftime('%Y-%m-%dT%H:%M:%S')
+            end_iso = datetime.combine(today, time(23,59,0)).strftime('%Y-%m-%dT%H:%M:%S')
+            try:
+                _ = em.list_emails(start=start_iso, end=end_iso, unread_only=True, limit=10)
+            except Exception:
+                pass
+        if callable(cal_fn):
+            cal = cal_fn()
+            try:
+                _ = cal.get_events()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 @app.post("/api/ask")
 async def ask(payload: dict):
@@ -91,6 +145,10 @@ async def dialog(
     backend: str = Form(None),
     language: str = Form(None),
     model: str = Form(None),
+    mailbox_name: str = Form(None),
+    calendar_name: str = Form(None),
+    only_with_attachments: str = Form(None),
+    unread_only: str = Form(None),
 ):
     """
     统一对话入口：
@@ -115,6 +173,9 @@ async def dialog(
                 fname = f"{uuid.uuid4().hex}{ext or ''}"
                 path = os.path.join(upload_dir, fname)
                 content = await f.read()
+                if len(content or b"") > (MAX_AUDIO_SIZE if ext in {".wav", ".mp3", ".m4a", ".mp4", ".aac", ".flac", ".ogg", ".webm"} else MAX_DOC_SIZE):
+                    context_parts.append(f"【附件：文件过大】\n文件：{f.filename}\n错误：超过大小限制")
+                    continue
                 with open(path, "wb") as out:
                     out.write(content)
 
@@ -170,9 +231,23 @@ async def dialog(
             except Exception as e:
                 context_parts.append(f"【附件处理异常】文件：{getattr(f, 'filename', '未知')}\n错误：{e}")
 
+    prune_uploads(upload_dir, 24)
+
+    # 应用偏好设置（供路由与兜底逻辑使用）
+    try:
+        agent.update_preferences(
+            default_mailbox_name=(mailbox_name or '').strip() or None,
+            default_calendar_name=(calendar_name or '').strip() or None,
+            meeting_only_with_attachments=True if str(only_with_attachments or '').lower() in {'true','1','on'} else False,
+            unread_only=True if str(unread_only or '').lower() in {'true','1','on'} else None,
+        )
+    except Exception:
+        pass
+
     combined_prompt = _safe_join([
         (f"用户指令：\n{user_prompt}" if user_prompt else "用户未提供明确指令。"),
         (f"附件上下文：\n{_safe_join(context_parts)}" if context_parts else ""),
+        (f"偏好设置：\n默认邮箱：{(mailbox_name or '').strip()}\n默认日历：{(calendar_name or '').strip()}\n仅处理含附件会议邀请：{('是' if str(only_with_attachments or '').lower() in {'true','1','on'} else '否')}\n未读优先：{('是' if str(unread_only or '').lower() in {'true','1','on'} else '否')}"),
         "请基于以上信息，自动选择合适的工具或代理完成任务。",
     ])
 
@@ -208,6 +283,8 @@ async def upload_audio(
     path = os.path.join(upload_dir, fname)
     try:
         content = await file.read()
+        if len(content or b"") > MAX_AUDIO_SIZE:
+            return JSONResponse({"ok": False, "error": "音频文件过大"}, status_code=400)
         with open(path, "wb") as f:
             f.write(content)
     except Exception as e:
@@ -273,6 +350,8 @@ async def meeting_minutes(
         apath = os.path.join(upload_dir, afname)
         try:
             acontent = await audio_file.read()
+            if len(acontent or b"") > MAX_AUDIO_SIZE:
+                return JSONResponse({"ok": False, "error": "音频文件过大"}, status_code=400)
             with open(apath, "wb") as f:
                 f.write(acontent)
         except Exception as e:

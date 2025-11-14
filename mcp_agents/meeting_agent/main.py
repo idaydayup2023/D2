@@ -15,6 +15,29 @@ class MCPAgent:
         self.summary = SummaryAgent()
         self.calendar = CalendarAgent()
 
+    def _batch_parse(self, metas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        best_model = self.llm_service.get_best_model()
+        if not best_model:
+            return []
+        sys_msg = (
+            "你是会议解析器。对提供的邮件元信息列表进行批量识别，"
+            "返回 JSON 数组，每个元素形如 {is_meeting:boolean, title:string|null, start:string|null, end:string|null, location:string|null, attendees:string[]|null, includes_me:boolean}。"
+            "时间使用本地时区，格式 YYYY-MM-DDTHH:MM:SS。"
+        )
+        try:
+            raw = self.llm_service.query(str(best_model), f"系统: {sys_msg}\n用户: {json.dumps(metas, ensure_ascii=False)}")
+        except Exception:
+            return []
+        text = "" if raw is None else str(raw)
+        try:
+            import re
+            m = re.search(r"\[[\s\S]*\]", text)
+            payload = m.group(0) if m else text
+            parsed = json.loads(payload)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+
     def _parse_meeting_with_llm(self, meta: Dict[str, Any]) -> Dict[str, Any]:
         """调用本地LLM，将邮件元数据+正文解析为会议JSON。失败返回空字典。"""
         best_model = self.llm_service.get_best_model()
@@ -65,11 +88,16 @@ class MCPAgent:
         if not items:
             return "没有找到符合条件的邮件。"
 
+        kw = ["会议", "邀请", "invite", "meeting", "日程", "安排", "zoom", "teams", "webex"]
         ids: List[str] = []
         for it in items:
-            mid = it.get("id")
-            if isinstance(mid, str) and mid.strip():
-                ids.append(mid)
+            subj = str(it.get("subject") or "")
+            if any(k.lower() in subj.lower() for k in kw):
+                mid = it.get("id")
+                if isinstance(mid, str) and mid.strip():
+                    ids.append(mid)
+        if not ids:
+            return "没有找到符合条件的会议邮件。"
         try:
             details = self.email.get_messages_by_ids(ids)
         except Exception as e:
@@ -80,6 +108,45 @@ class MCPAgent:
         except Exception:
             my_addrs = []
 
+        metas: List[Dict[str, Any]] = []
+        for d in details:
+            metas.append({
+                "subject": d.get("subject") or "",
+                "sender": d.get("sender") or "",
+                "to": d.get("to") or [],
+                "cc": d.get("cc") or [],
+                "my_addresses": my_addrs,
+                "body": d.get("body") or "",
+            })
+        parsed_list = self._batch_parse(metas)
+
+        # 并行摘要：仅对识别为会议的邮件生成摘要
+        idx_meetings = [i for i, info in enumerate(parsed_list, 1) if isinstance(info, dict) and bool(info.get("is_meeting"))]
+        summaries = {}
+        if idx_meetings:
+            try:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                def _summ(i):
+                    d = details[i-1]
+                    try:
+                        return i, self.summary.summarize(
+                            input_text=d.get("body") or "",
+                            file_path=None,
+                            style="信息型",
+                            length="简短",
+                            language="zh",
+                            output_format="bullets",
+                        )
+                    except Exception:
+                        return i, "(摘要生成失败)"
+                with ThreadPoolExecutor(max_workers=min(4, len(idx_meetings))) as ex:
+                    futs = [ex.submit(_summ, i) for i in idx_meetings]
+                    for fut in as_completed(futs):
+                        k, v = fut.result()
+                        summaries[k] = v
+            except Exception:
+                pass
+
         lines: List[str] = []
         auto_added = 0
         for i, d in enumerate(details, 1):
@@ -89,54 +156,39 @@ class MCPAgent:
             mailbox = d.get("mailbox") or ""
             read = d.get("read")
             tag = "未读" if read is False else "已读"
-            to_addrs = d.get("to") or []
-            cc_addrs = d.get("cc") or []
-            body = d.get("body") or ""
-
-            # 要点式摘要
-            try:
-                summary = self.summary.summarize(
-                    input_text=body,
-                    file_path=None,
-                    style="信息型",
-                    length="简短",
-                    language="zh",
-                    output_format="bullets",
-                )
-            except Exception:
-                summary = "(摘要生成失败)"
-
-            meta = {
-                "subject": subj,
-                "sender": sender,
-                "to": to_addrs,
-                "cc": cc_addrs,
-                "my_addresses": my_addrs,
-                "body": body,
-            }
-            meeting_json = self._parse_meeting_with_llm(meta)
-
-            is_meeting = bool(meeting_json.get("is_meeting")) if isinstance(meeting_json, dict) else False
-            includes_me = bool(meeting_json.get("includes_me")) if isinstance(meeting_json, dict) else False
-            title = meeting_json.get("title") if isinstance(meeting_json.get("title"), str) else None
-            start_i = meeting_json.get("start") if isinstance(meeting_json.get("start"), str) else None
-            end_i = meeting_json.get("end") if isinstance(meeting_json.get("end"), str) else None
-            location = meeting_json.get("location") if isinstance(meeting_json.get("location"), str) else None
-            attendees = meeting_json.get("attendees") if isinstance(meeting_json.get("attendees"), list) else []
+            info = parsed_list[i-1] if i-1 < len(parsed_list) and isinstance(parsed_list[i-1], dict) else {}
+            is_meeting = bool(info.get("is_meeting")) if isinstance(info, dict) else False
+            includes_me = bool(info.get("includes_me")) if isinstance(info, dict) else False
+            title = info.get("title") if isinstance(info.get("title"), str) else None
+            start_i = info.get("start") if isinstance(info.get("start"), str) else None
+            end_i = info.get("end") if isinstance(info.get("end"), str) else None
+            location = info.get("location") if isinstance(info.get("location"), str) else None
+            attendees = info.get("attendees") if isinstance(info.get("attendees"), list) else []
 
             header = f"{i}. {subj} | {sender} | {date_s} | {mailbox} | {tag}"
             lines.append(header)
-            lines.append(f"摘要(要点)：\n{summary}")
 
             if is_meeting:
+                summary = summaries.get(i)
+                if not summary:
+                    try:
+                        summary = self.summary.summarize(
+                            input_text=d.get("body") or "",
+                            file_path=None,
+                            style="信息型",
+                            length="简短",
+                            language="zh",
+                            output_format="bullets",
+                        )
+                    except Exception:
+                        summary = "(摘要生成失败)"
+                lines.append(f"摘要(要点)：\n{summary}")
                 lines.append("会议信息：")
                 lines.append(f"- 标题: {title or '(未知)'}")
                 lines.append(f"- 开始: {start_i or '(未知)'}")
                 lines.append(f"- 结束: {end_i or '(未知)'}")
                 lines.append(f"- 地点: {location or '(未知)'}")
                 lines.append(f"- 参会: {', '.join(attendees) if attendees else '(未知)'}")
-
-                # 自动入日历：缺失 end 时，默认 +1 小时
                 if includes_me and isinstance(start_i, str) and start_i.strip():
                     end_for_event = end_i if isinstance(end_i, str) and end_i.strip() else start_i
                     try:

@@ -17,7 +17,18 @@ class D2Agent:
         self.mcp_agents = []
         self.llm_service = LLMService()
         self.stt_service = STTService()
+        self.preferences: Dict[str, Any] = {}
         self.load_mcp_agents()
+
+    def update_preferences(self, default_mailbox_name: Optional[str] = None, default_calendar_name: Optional[str] = None, meeting_only_with_attachments: Optional[bool] = None, unread_only: Optional[bool] = None):
+        if isinstance(default_mailbox_name, str) and default_mailbox_name.strip():
+            self.preferences['default_mailbox_name'] = default_mailbox_name.strip()
+        if isinstance(default_calendar_name, str) and default_calendar_name.strip():
+            self.preferences['default_calendar_name'] = default_calendar_name.strip()
+        if isinstance(meeting_only_with_attachments, bool):
+            self.preferences['meeting_only_with_attachments'] = meeting_only_with_attachments
+        if isinstance(unread_only, bool):
+            self.preferences['unread_only'] = unread_only
 
     def _find_calendar_agent(self):
         for agent in self.mcp_agents:
@@ -103,7 +114,7 @@ class D2Agent:
                         start_iso = datetime.combine(monday, time(0, 0, 0)).strftime('%Y-%m-%dT%H:%M:%S')
                         end_iso = datetime.combine(monday + timedelta(days=horizon_days), time(23, 59, 0)).strftime('%Y-%m-%dT%H:%M:%S')
                     try:
-                        events = cal.get_events(start=start_iso, end=end_iso)
+                        events = cal.get_events(start=start_iso, end=end_iso, calendar_name=self.preferences.get('default_calendar_name'))
                     except Exception as e:
                         return f"抱歉，读取日历时出现错误：{e}"
                     if not events:
@@ -138,7 +149,8 @@ class D2Agent:
                     end_iso = end_iso_raw if isinstance(end_iso_raw, str) else None
                     cal_name = cal_name_raw if isinstance(cal_name_raw, str) and cal_name_raw.strip() else None
                     try:
-                        events = cal.get_events(start=start_iso, end=end_iso, calendar_name=cal_name)
+                        cal_name_eff = cal_name or self.preferences.get('default_calendar_name')
+                        events = cal.get_events(start=start_iso, end=end_iso, calendar_name=cal_name_eff)
                     except Exception as e:
                         return f"抱歉，读取日历时出现错误：{e}"
                     if not events:
@@ -303,7 +315,9 @@ class D2Agent:
                     except Exception:
                         limit = 20
                     try:
-                        items = em.list_emails(start=start_iso, end=end_iso, mailbox_name=mailbox_name, unread_only=unread_only, limit=limit)
+                        mailbox_eff = mailbox_name or self.preferences.get('default_mailbox_name')
+                        unread_eff = unread_only if isinstance(unread_only, bool) else bool(self.preferences.get('unread_only'))
+                        items = em.list_emails(start=start_iso, end=end_iso, mailbox_name=mailbox_eff, unread_only=unread_eff, limit=limit)
                     except Exception as e:
                         return f"抱歉，读取邮件时出现错误：{e}"
                     if not items:
@@ -448,12 +462,31 @@ class D2Agent:
                     if not cal:
                         return "抱歉，未加载到日历智能体。"
                     try:
-                        items = em.list_emails(start=start_iso, end=end_iso, mailbox_name=mailbox_name, unread_only=unread_only, limit=limit)
+                        mailbox_eff = mailbox_name or self.preferences.get('default_mailbox_name')
+                        unread_eff = unread_only if isinstance(unread_only, bool) else bool(self.preferences.get('unread_only'))
+                        items = em.list_emails(start=start_iso, end=end_iso, mailbox_name=mailbox_eff, unread_only=unread_eff, limit=limit)
                     except Exception as e:
                         return f"抱歉，读取邮件时出现错误：{e}"
                     if not items:
                         return "没有找到符合条件的邮件。"
                     ids = [it.get('id') for it in items if it.get('id')]
+                    only_with_atts = bool(self.preferences.get('meeting_only_with_attachments'))
+                    if only_with_atts:
+                        try:
+                            import os
+                            tmp_root = os.path.join('/tmp', 'd2_meeting_filter')
+                            os.makedirs(tmp_root, exist_ok=True)
+                            kept = []
+                            for mid in ids:
+                                try:
+                                    saved = em.save_attachments_by_ids([mid], tmp_root)
+                                except Exception:
+                                    saved = []
+                                if saved:
+                                    kept.append(mid)
+                            ids = kept
+                        except Exception:
+                            pass
                     try:
                         details = em.get_messages_by_ids(ids)
                     except Exception as e:
@@ -609,7 +642,7 @@ class D2Agent:
                 return None
             start_iso, end_iso = self._resolve_range_from_prompt(prompt)
             try:
-                events = cal.get_events(start=start_iso, end=end_iso)
+                events = cal.get_events(start=start_iso, end=end_iso, calendar_name=self.preferences.get('default_calendar_name'))
             except Exception as e:
                 return f"抱歉，读取日历时出现错误：{e}"
             if not events:
@@ -740,7 +773,8 @@ class D2Agent:
             unread_only = True if '未读' in prompt else True
             start_iso, end_iso = self._resolve_range_from_prompt(prompt)
             try:
-                items = em.list_emails(start=start_iso, end=end_iso, unread_only=unread_only, limit=20)
+                mailbox_eff = self.preferences.get('default_mailbox_name')
+                items = em.list_emails(start=start_iso, end=end_iso, mailbox_name=mailbox_eff, unread_only=unread_only, limit=20)
             except Exception as e:
                 return f"抱歉，读取邮件时出现错误：{e}"
             if not items:
@@ -864,7 +898,8 @@ class D2Agent:
             unread_only = True
             start_iso, end_iso = self._resolve_range_from_prompt(prompt)
             try:
-                items = em.list_emails(start=start_iso, end=end_iso, unread_only=unread_only, limit=20)
+                mailbox_eff = self.preferences.get('default_mailbox_name')
+                items = em.list_emails(start=start_iso, end=end_iso, mailbox_name=mailbox_eff, unread_only=unread_only, limit=20)
             except Exception as e:
                 return f"抱歉，读取邮件时出现错误：{e}"
             if not items or idx > len(items):
@@ -979,7 +1014,7 @@ class D2Agent:
         now_iso = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         sys_msg = (
             "你是一个路由器，负责把用户的中文指令解析为一个 JSON。"
-            "只输出 JSON，不要输出其他文字。"
+            "仅输出JSON，不输出任何额外文字、代码块或解释。"
             "字段包括: route<'calendar'|'email'|'summary'|'stt'|'none'>, action<'list'|'create'|'send'|'verify'|'mark'|'move'|'summarize'|'process_meetings'|'review_attachments'|'transcribe'|null>,"
             " start<YYYY-MM-DDTHH:MM:SS或null>, end<同上或null>, calendar_name<或null>,"
             " title<创建事件标题或null>, location<或null>, remaining<boolean，用于'还有/剩余/剩下'>,"
@@ -1016,9 +1051,43 @@ class D2Agent:
         # 保证字符串类型，避免 None 或非字符串导致的类型问题
         raw_str: str = "" if raw is None else str(raw)
 
-        # 尝试提取第一个 JSON 文本块
-        m = re.search(r"\{[\s\S]*\}", raw_str)
-        text: str = m.group(0) if m else raw_str
+        def _extract_json_block(s: str) -> Optional[str]:
+            code_m = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", s, re.IGNORECASE)
+            if code_m:
+                return code_m.group(1)
+            start = s.find('{')
+            if start < 0:
+                return None
+            depth = 0
+            in_str = False
+            esc = False
+            end = None
+            for i in range(start, len(s)):
+                ch = s[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == '\\':
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                else:
+                    if ch == '"':
+                        in_str = True
+                    elif ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end = i
+                            break
+                
+            if end is not None:
+                return s[start:end+1]
+            return None
+
+        text_block = _extract_json_block(raw_str) or raw_str
+        text: str = text_block
 
         try:
             parsed_any = json.loads(text)
