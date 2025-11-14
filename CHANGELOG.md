@@ -2,6 +2,36 @@
 
 所有值得注意的更改都会记录在此文件中。遵循语义化版本（SemVer）。
 
+## v0.3.0 — 2025-11-14
+
+标签：`v0.3.0`  ·  提交：`94ae906`
+
+### 性能
+- 邮件列表/详情查询加入缓存（TTL 45s），重复查询快速返回；在标记与移动操作后自动失效相关缓存。
+- 会议识别批量化：多封邮件元数据一次性提交 LLM，减少逐封推理带来的延迟。
+- 会议摘要并行生成：对识别为会议的邮件并行生成要点摘要（最多 4 并发）。
+- GUI 启动预热：后台预热“今日未读邮件（10条）”与日历事件，提升首请求速度。
+
+### 功能
+- GUI 偏好选项：支持默认邮箱（文件夹）、默认日历、仅处理含附件的会议邀请、优先未读。
+- 路由解析：强化 JSON 提示与提取，支持代码块与括号匹配，降低非结构化输出的影响。
+
+### 稳健性与兼容
+- 动态导入 `ollama/openai`，避免在未安装依赖时发生 ImportError。
+- AppleScript 兼容性：将“≥”修正为 ASCII `>=`，并缩短激活延时（0.5s → 0.2s）。
+- 安全与交互：新增 CORS 中间件；上传大小限制（音频 50MB、文档 10MB）与过期清理（24h）。
+- 文档：`DEVELOPER_GUIDE.md` 补充参数策略、偏好生效位置与代码引用。
+
+### 变更范围
+- `services/llm_service.py`
+- `mcp_agents/email_agent/main.py`
+- `mcp_agents/meeting_agent/main.py`
+- `main_agent/d2_main.py`
+- `gui/server.py`
+- `gui/templates/index.html`
+- `requirements.txt`
+- `DEVELOPER_GUIDE.md`
+
 ## v0.2.0 — 2025-11-12
 
 标签：`v0.2.0`  ·  提交：`a7068e8`
